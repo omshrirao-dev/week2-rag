@@ -1,0 +1,153 @@
+import os
+import json
+from sentence_transformers import SentenceTransformer
+from qdrant_client import QdrantClient
+from qdrant_client.models import VectorParams, Distance, PointStruct
+
+# ─────────────────────────────────────────
+# BLOCK 3 — EMBED
+# Convert each chunk into a vector
+# ─────────────────────────────────────────
+
+# Load the embedding model
+# This model converts text → vectors locally (no API cost)
+# all-MiniLM-L6-v2 → fast, small, good quality
+# Each text becomes a vector of 384 numbers
+print("Loading embedding model...")
+model = SentenceTransformer('all-MiniLM-L6-v2')
+print("Model loaded.")
+
+def embed_chunks(chunks):
+    """Convert each chunk text into a vector"""
+    
+    print(f"Embedding {len(chunks)} chunks...")
+    
+    # Extract just the text from each chunk
+    texts = [chunk["text"] for chunk in chunks]
+    
+    # Convert all texts to vectors in one batch
+    # Returns a list of vectors — one per chunk
+    embeddings = model.encode(texts, show_progress_bar=True)
+    
+    print(f"Embedding complete. Vector size: {len(embeddings[0])}")
+    
+    return embeddings
+
+
+# ─────────────────────────────────────────
+# BLOCK 4 — STORE
+# Save vectors into Qdrant vector database
+# ─────────────────────────────────────────
+
+def setup_qdrant(collection_name="nvidia_docs"):
+    """Create Qdrant client and collection"""
+    
+    # Run Qdrant locally in memory — no server needed
+    client = QdrantClient(":memory:")
+    
+    # Create a collection — like a table in a regular database
+    # vectors_config defines: how big each vector is + how to measure distance
+    client.create_collection(
+        collection_name=collection_name,
+        vectors_config=VectorParams(
+            size=384,           # must match embedding model output size
+            distance=Distance.COSINE  # cosine similarity — best for text
+        )
+    )
+    
+    print(f"Qdrant collection '{collection_name}' created.")
+    return client
+
+
+def store_chunks(client, chunks, embeddings, collection_name="nvidia_docs"):
+    """Store chunks and their vectors in Qdrant"""
+    
+    points = []
+    
+    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+        point = PointStruct(
+            id=i,                          # unique ID for this point
+            vector=embedding.tolist(),     # the vector (list of numbers)
+            payload={                      # metadata stored alongside vector
+                "text": chunk["text"],
+                "chunk_id": chunk["id"],
+                "word_count": chunk["word_count"]
+            }
+        )
+        points.append(point)
+    
+    # Upload all points to Qdrant in one batch
+    client.upsert(
+        collection_name=collection_name,
+        points=points
+    )
+    
+    print(f"Stored {len(points)} chunks in Qdrant.")
+    return client
+
+
+# ─────────────────────────────────────────
+# BLOCK 5 — RETRIEVE
+# Find most relevant chunks for any question
+# ─────────────────────────────────────────
+
+def retrieve_chunks(client, question, top_k=5, collection_name="nvidia_docs"):
+    question_vector = model.encode([question])[0]
+    
+    results = client.query_points(
+        collection_name=collection_name,
+        query=question_vector.tolist(),
+        limit=top_k
+    ).points
+    
+    retrieved = []
+    for result in results:
+        retrieved.append({
+            "text": result.payload["text"],
+            "chunk_id": result.payload["chunk_id"],
+            "score": result.score
+        })
+    
+    return retrieved
+
+
+# ─────────────────────────────────────────
+# TEST IT
+# ─────────────────────────────────────────
+
+if __name__ == "__main__":
+    
+    # Import our chunker from previous file
+    import sys
+    sys.path.append('.')
+    from load_and_chunk import load_pdf, chunk_text
+    
+    # Load and chunk the PDF
+    print("\n--- Loading PDF ---")
+    text = load_pdf("nvidia_annual_report_2024.pdf")
+    chunks = chunk_text(text, chunk_size=500, overlap=50)
+    
+    # Embed all chunks
+    print("\n--- Embedding chunks ---")
+    embeddings = embed_chunks(chunks)
+    
+    # Store in Qdrant
+    print("\n--- Storing in Qdrant ---")
+    client = setup_qdrant()
+    store_chunks(client, chunks, embeddings)
+    
+    # Test retrieval with 3 questions
+    print("\n--- Testing Retrieval ---")
+    
+    test_questions = [
+        "What was Nvidia's total revenue in 2024?",
+        "What are the main risks facing Nvidia?",
+        "How does Nvidia's data center business perform?"
+    ]
+    
+    for question in test_questions:
+        print(f"\nQuestion: {question}")
+        results = retrieve_chunks(client, question, top_k=3)
+        print(f"Top result (score: {results[0]['score']:.3f}):")
+        print(f"{results[0]['text'][:200]}...")
+        print("-" * 50)
