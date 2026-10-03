@@ -1,3 +1,10 @@
+
+| Metric              | Score  |
+|---------------------|--------|
+| Accuracy (20 Qs)    | 90%    |
+| Chunks indexed      | 219    |
+| Avg response time   | ~2s    |
+
 ---
 title: Nvidia Document Intelligence
 emoji: 🤖
